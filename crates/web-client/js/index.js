@@ -1,6 +1,6 @@
 import loadWasm from "./wasm.js";
 const wasm = await loadWasm();
-import { MethodName, WorkerAction } from "./constants.js";
+import { CallbackType, MethodName, WorkerAction } from "./constants.js";
 export * from "../Cargo.toml";
 const { WebClient: WasmWebClient } = wasm;
 /**
@@ -59,10 +59,7 @@ export class WebClient {
 
     // Check if Web Workers are available.
     if (
-      typeof Worker !== "undefined" &&
-      !this.getKeyCb &&
-      !this.insertKeyCb &&
-      !this.signCb
+      typeof Worker !== "undefined"
     ) {
       console.log("WebClient: Web Workers are available.");
       // Create the worker.
@@ -85,7 +82,7 @@ export class WebClient {
       });
 
       // Listen for messages from the worker.
-      this.worker.addEventListener("message", (event) => {
+      this.worker.addEventListener("message", async (event) => {
         const data = event.data;
 
         // Worker script loaded.
@@ -97,6 +94,37 @@ export class WebClient {
         // Worker ready.
         if (data.ready) {
           this.readyResolver();
+          return;
+        }
+
+        if (data.action === WorkerAction.EXECUTE_CALLBACK) {
+          const { callbackType, args, requestId } = data;
+          try {
+            const callbackMapping = {
+              [CallbackType.GET_KEY]: this.getKeyCb,
+              [CallbackType.INSERT_KEY]: this.insertKeyCb,
+              [CallbackType.SIGN]: this.signCb
+            };
+            if (!callbackMapping[callbackType]) {
+              throw new Error(`Callback ${callbackType} not available`);
+            }
+            const callbackFunction = callbackMapping[callbackType];
+            const callbackResult = callbackFunction.apply(this, args);
+            if (!callbackResult instanceof Promise) {
+              throw new Error(`Callback ${callbackType} does not return a Promise`);
+            }
+            const result = await callbackResult;
+
+            this.worker.postMessage({
+              callbackResult: result,
+              callbackRequestId: requestId,
+            });
+          } catch (error) {
+            this.worker.postMessage({
+              callbackError: error.message,
+              callbackRequestId: requestId,
+            });
+          }
           return;
         }
 
@@ -125,9 +153,9 @@ export class WebClient {
             this.rpcUrl,
             this.noteTransportUrl,
             this.seed,
-            this.getKeyCb,
-            this.insertKeyCb,
-            this.signCb,
+            this.getKeyCb !== undefined,
+            this.insertKeyCb !== undefined,
+            this.signCb !== undefined,
           ],
         });
       });
